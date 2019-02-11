@@ -11,6 +11,7 @@
     "minimum-stability": "stable",
     "require": {
         "fed/ewma-module-installer-plugin": "~0.0.1",
-        "fed/clients": "^0.1"
+        "fed/clients": "^0.1",
+        "pusher/pusher-php-server": "^3.0"
     }
 }
