@@ -1,7 +1,20 @@
 <?php namespace clients\pusher;
 
-class Svc extends \ewma\Service\Service
+class Svc
 {
+    /**
+     * @var $mainController \clients\pusher\controllers\Main
+     */
+    private $mainController;
+
+    /**
+     * @var $queueController \clients\pusher\controllers\Queue
+     */
+    private $queueController;
+
+    /**
+     * @return \clients\pusher\Svc
+     */
     public static $instances = [];
 
     public $instance;
@@ -9,84 +22,72 @@ class Svc extends \ewma\Service\Service
     /**
      * @return \clients\pusher\Svc
      */
-    public static function getInstance($instance)
+    public static function getInstance($channel)
     {
-        if (!isset(static::$instances[$instance])) {
-            $svc = new self;
-
-            $svc->instance = $instance;
-
-            static::$instances[$instance] = $svc;
-            static::$instances[$instance]->__register__();
+        if (!isset(static::$instances[$channel])) {
+            static::$instances[$channel] = new self($channel);
         }
 
-        return static::$instances[$instance];
+        return static::$instances[$channel];
     }
 
     private $connection;
 
     private $channel;
 
-    public function boot()
-    {
-        $instanceArray = explode(':', $this->instance);
-
-        if (count($instanceArray) == 2) {
-            $connectionName = $instanceArray[0];
-            $this->channel = $instanceArray[1];
-        } elseif (count($instanceArray) == 1) {
-            $connectionName = 'main';
-            $this->channel = $instanceArray[0];
-        } else {
-            $connectionName = 'main';
-            $this->channel = 'default';
-        }
-
-        $this->connection = dataSets()->get('pusher/connections:' . $connectionName);
-    }
-
-    //
-    //
-    //
-
     private $pusher;
 
+    public function __construct($channel)
+    {
+        $this->channel = $channel;
+        $this->connection = dataSets()->get('pusher/connections:' . app()->getEnv());
+
+        $this->mainController = appc('\clients\pusher~');
+        $this->queueController = appc('\clients\pusher queue|' . $this->channel);
+
+        $this->pusher = $this->getPusher();
+    }
+
+    /**
+     * @return \Pusher\Pusher
+     * @throws \Pusher\PusherException
+     */
     private function getPusher()
     {
         if (null === $this->pusher) {
+
             $options = [
                 'encrypted' => true,
                 'cluster'   => $this->connection['cluster'],
-                'debug'     => true
+                'debug'     => $this->connection['debug']
             ];
 
-            $this->pusher = new \Pusher\Pusher(
-                $this->connection['key'],
-                $this->connection['secret'],
-                $this->connection['app_id'],
-                $options
-            );
+            try {
+                $this->pusher = new \Pusher\Pusher(
+                    $this->connection['key'],
+                    $this->connection['secret'],
+                    $this->connection['app_id'],
+                    $options
+                );
+            } catch (\Pusher\PusherException $exception) {
+                $this->mainController->log($exception->getMessage());
+            }
         }
 
         return $this->pusher;
     }
 
-    public function getChannelInfo()
-    {
-        return $this->getPusher()->get_channel_info($this->channel);
-    }
-
-    public function subscribe($event = 'trigger')
+    public function subscribe()
     {
         $appc = appc();
 
         $appc->js('\clients\pusher pusher.min');
         $appc->js('\clients\pusher~:.subscribe', [
-            'key'     => $this->connection['key'],
-            'self'    => md5(app()->session->getKey()),
-            'channel' => $this->channel,
-            'cluster' => $this->connection['cluster'],
-            'event'   => $event
+            'key'        => $this->connection['key'],
+            'self'       => md5(app()->session->getKey()),
+            'channel'    => $this->channel,
+            'cluster'    => $this->connection['cluster'],
+            'logEnabled' => $this->connection['debug']
         ]);
     }
 
@@ -98,12 +99,14 @@ class Svc extends \ewma\Service\Service
      */
     public function trigger($event, $data = [])
     {
-        appc('\ewma~queue:add|pusher', [
+        $job = [
             'tab'   => app()->tab,
             'self'  => false,
             'event' => $event,
             'data'  => $data
-        ]);
+        ];
+
+        $this->queueController->add($job);
 
         appc()->jsCall('ewma.trigger', $event, $data);
     }
@@ -116,12 +119,14 @@ class Svc extends \ewma\Service\Service
      */
     public function triggerOthers($event, $data = [])
     {
-        appc('\ewma~queue:add|pusher', [
+        $job = [
             'tab'   => app()->tab,
             'self'  => false,
             'event' => $event,
             'data'  => $data
-        ]);
+        ];
+
+        $this->queueController->add($job);
     }
 
     /**
@@ -132,12 +137,14 @@ class Svc extends \ewma\Service\Service
      */
     public function triggerSelf($event, $data = [])
     {
-        appc('\ewma~queue:add|pusher', [
+        $jobData = [
             'tab'   => app()->tab,
             'self'  => md5(app()->session->getKey()),
             'event' => $event,
             'data'  => $data
-        ]);
+        ];
+
+        $this->queueController->add($jobData);
 
         appc()->jsCall('ewma.trigger', $event, $data);
     }
@@ -150,23 +157,27 @@ class Svc extends \ewma\Service\Service
      */
     public function triggerSelfOthers($event, $data = [])
     {
-        appc('\ewma~queue:add|pusher', [
+        $job = [
             'tab'   => app()->tab,
             'self'  => md5(app()->session->getKey()),
             'event' => $event,
             'data'  => $data
-        ]);
+        ];
+
+        $this->queueController->add($job);
     }
 
-    public function triggerNow($tab, $self, $event, $data = [])
+    public function sendTriggerRequest($tab, $self, $event, $data = [])
     {
-        $pusher = $this->getPusher();
-
-        return $pusher->trigger($this->channel, 'trigger', [
-            'tab'   => $tab,
-            'self'  => $self,
-            'event' => $event,
-            'data'  => $data
-        ]);
+        try {
+            return $this->pusher->trigger($this->channel, 'trigger', [
+                'tab'   => $tab,
+                'self'  => $self,
+                'event' => $event,
+                'data'  => $data
+            ]);
+        } catch (\Pusher\PusherException $exception) {
+            $this->mainController->log($exception->getMessage());
+        }
     }
 }

@@ -12,7 +12,7 @@ var __nodeId__ = "clients_pusher__main";
         subscribe: function (data) {
             var node = window[__nodeId__];
 
-            if (ewma.log.pusher) {
+            if (data.logEnabled) {
                 Pusher.logToConsole = true;
             }
 

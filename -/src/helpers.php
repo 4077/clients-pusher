@@ -1,6 +1,6 @@
 <?php
 
-function pusher($channel = 'main:default')
+function pusher($channel = 'default')
 {
     return \clients\pusher\Svc::getInstance($channel);
 }
