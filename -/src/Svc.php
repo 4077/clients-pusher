@@ -2,182 +2,75 @@
 
 class Svc
 {
+    public static $instance;
+
     /**
-     * @var $mainController \clients\pusher\controllers\Main
+     * @return \clients\pusher\Svc
      */
-    private $mainController;
+    public static function getInstance()
+    {
+        if (!isset(static::$instance)) {
+            static::$instance = new self;
+        }
+
+        return static::$instance;
+    }
 
     /**
      * @var $queueController \clients\pusher\controllers\Queue
      */
-    private $queueController;
+    public $queueController;
 
-    /**
-     * @return \clients\pusher\Svc
-     */
-    public static $instances = [];
+    public $enabled = true;
 
-    public $instance;
+    public $log;
 
-    /**
-     * @return \clients\pusher\Svc
-     */
-    public static function getInstance($channel)
+    public function __construct()
     {
-        if (!isset(static::$instances[$channel])) {
-            static::$instances[$channel] = new self($channel);
-        }
+        $this->queueController = appc('\clients\pusher queue');
 
-        return static::$instances[$channel];
+        $this->log = \std\log('clients/pusher');
     }
 
-    private $connection;
-
-    private $channel;
-
-    private $pusher;
-
-    public function __construct($channel)
+    public function disable()
     {
-        $this->channel = $channel;
-        $this->connection = dataSets()->get('pusher/connections:' . app()->getEnv());
-
-        $this->mainController = appc('\clients\pusher~');
-        $this->queueController = appc('\clients\pusher queue|' . $this->channel);
-
-        $this->pusher = $this->getPusher();
+        $this->enabled = false;
     }
 
+    public function enable()
+    {
+        $this->enabled = true;
+    }
+
+    private $pusherInstances = [];
+
     /**
-     * @return \Pusher\Pusher
+     * @return \Pusher\Pusher|\BlackHole
      * @throws \Pusher\PusherException
      */
-    private function getPusher()
+    public function getPusher($env)
     {
-        if (null === $this->pusher) {
+        if (!isset($this->pusherInstances[$env])) {
+            $connection = dataSets()->get('pusher/connections:' . $env);
 
             $options = [
                 'encrypted' => true,
-                'cluster'   => $this->connection['cluster'],
-                'debug'     => $this->connection['debug']
+                'cluster'   => $connection['cluster'],
+                'debug'     => $connection['debug'],
             ];
 
             try {
-                $this->pusher = new \Pusher\Pusher(
-                    $this->connection['key'],
-                    $this->connection['secret'],
-                    $this->connection['app_id'],
+                $this->pusherInstances[$env] = new \Pusher\Pusher(
+                    $connection['key'],
+                    $connection['secret'],
+                    $connection['app_id'],
                     $options
                 );
             } catch (\Pusher\PusherException $exception) {
-                $this->mainController->log($exception->getMessage());
+                $this->log->row('\white,red; error \; ' . $exception->getMessage());
             }
         }
 
-        return $this->pusher;
-    }
-
-    public function subscribe()
-    {
-        $appc = appc();
-
-        $appc->js('\clients\pusher pusher.min');
-        $appc->js('\clients\pusher~:.subscribe', [
-            'key'        => $this->connection['key'],
-            'self'       => md5(app()->session->getKey()),
-            'channel'    => $this->channel,
-            'cluster'    => $this->connection['cluster'],
-            'logEnabled' => $this->connection['debug']
-        ]);
-    }
-
-    /**
-     * Все вкладки всех подписчиков
-     *
-     * @param       $event
-     * @param array $data
-     */
-    public function trigger($event, $data = [])
-    {
-        $job = [
-            'tab'   => app()->tab,
-            'self'  => false,
-            'event' => $event,
-            'data'  => $data
-        ];
-
-        $this->queueController->add($job);
-
-        appc()->jsCall('ewma.trigger', $event, $data);
-    }
-
-    /**
-     * Все вкладки всех подписчиков кроме текущей
-     *
-     * @param       $event
-     * @param array $data
-     */
-    public function triggerOthers($event, $data = [])
-    {
-        $job = [
-            'tab'   => app()->tab,
-            'self'  => false,
-            'event' => $event,
-            'data'  => $data
-        ];
-
-        $this->queueController->add($job);
-    }
-
-    /**
-     * Все вкладки текущего пользователя
-     *
-     * @param       $event
-     * @param array $data
-     */
-    public function triggerSelf($event, $data = [])
-    {
-        $jobData = [
-            'tab'   => app()->tab,
-            'self'  => md5(app()->session->getKey()),
-            'event' => $event,
-            'data'  => $data
-        ];
-
-        $this->queueController->add($jobData);
-
-        appc()->jsCall('ewma.trigger', $event, $data);
-    }
-
-    /**
-     * Все вкладки текущего подписчика кроме текущей
-     *
-     * @param       $event
-     * @param array $data
-     */
-    public function triggerSelfOthers($event, $data = [])
-    {
-        $job = [
-            'tab'   => app()->tab,
-            'self'  => md5(app()->session->getKey()),
-            'event' => $event,
-            'data'  => $data
-        ];
-
-        $this->queueController->add($job);
-    }
-
-    public function sendTriggerRequest($tab, $self, $event, $data = [])
-    {
-        try {
-            return $this->pusher->trigger($this->channel, 'trigger', [
-                'tab'   => $tab,
-                'self'  => $self,
-                'event' => $event,
-                'data'  => $data
-            ]);
-        } catch (\Pusher\PusherException $exception) {
-            $this->mainController->log($exception->getMessage());
-        }
+        return $this->pusherInstances[$env];
     }
 }

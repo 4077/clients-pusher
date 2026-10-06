@@ -2,46 +2,71 @@
 
 class Queue extends \Controller
 {
-    public $channel;
-
     public function __create()
     {
-        $this->channel = $this->_instance('default');
-
         $this->initFiles();
+    }
+
+    private $queueFilePath;
+
+    private function initFiles()
+    {
+        $this->queueFilePath = $this->_protected('default.queue');
+
+        if (!file_exists($this->queueFilePath)) {
+            write($this->queueFilePath);
+        }
     }
 
     public function handle()
     {
         $d = $this->d('|', [
-            'log' => false
+            'log' => false,
         ]);
 
         $input = [
             'sleep_ms' => $this->data('sleep_ms') ?? 100,
             'ttl'      => $this->data('ttl') ?? 10,
-            'log'      => $d['log']
+            'log'      => $d['log'],
         ];
 
-        $process = $this->proc(':loop|')->pathLock($this->channel)->run($input);
+        $process = $this->proc(':loop|')->pathLock()->run($input);
 
         if ($process) {
             $this->d(':pid|', $process->getPid(), RR);
 
             return [
                 'time' => dt(),
-                'pid'  => $process->getPid()
+                'pid'  => $process->getPid(),
             ];
         }
+    }
+
+    private $channels = [];
+
+    /**
+     * @return \clients\pusher\Svc
+     */
+    private function getPusher($channel, $env)
+    {
+        if (!isset($this->channels[$env][$channel])) {
+            $this->channels[$env][$channel] = pusher($channel, $env);
+
+            $log = \std\log('clients/pusher/queue'); // todo del
+
+            $log->row('create instance ' . $channel . '[' . $env . ']');
+        }
+
+        return $this->channels[$env][$channel];
     }
 
     public function loop()
     {
         $process = process();
 
-        $process->output('nothing happened');
+        $log = \std\log('clients/pusher/queue'); // todo del
 
-        $pusher = pusher($this->channel);
+        $process->outputRR('nothing happened');
 
         $queueFileMTime = filemtime($this->queueFilePath);
 
@@ -49,83 +74,95 @@ class Queue extends \Controller
         $totalJobsCount = 0;
         $expiresCount = 0;
 
-        $processInput = $process->input();
+        $processInput = $process->_input();
 
         while (true) {
             if (true === $process->handleIteration($processInput['sleep_ms'])) {
                 break;
             }
 
-            clearstatcache(true, $this->queueFilePath);
+//            clearstatcache(true, $this->queueFilePath);
 
-            if ($queueFileMTime != filemtime($this->queueFilePath)) {
-                $queueFileMTime = filemtime($this->queueFilePath);
+//            if ($queueFileMTime != filemtime($this->queueFilePath)) {
+            $processInput = $process->_input();
 
-                $processInput = $process->input();
+            aa($processInput, [
+                'sleep_ms' => 10,
+                'ttl'      => 10,
+                'log'      => false,
+            ]);
 
-                $ttl = $processInput['ttl'];
+            $ttl = $processInput['ttl'];
 
-                $jobs = file($this->queueFilePath);
+            $jobs = file($this->queueFilePath);
 
-                if ($jobsCount = count($jobs)) {
-                    foreach ($jobs as $job) {
-                        $jobData = _j($job);
+            write($this->queueFilePath, '');
 
-                        list($time, $tab, $self, $event, $data) = $jobData;
+            if ($jobsCount = count($jobs)) {
+                foreach ($jobs as $job) {
+                    $jobData = _j($job);
 
-                        $expired = false;
-                        $response = '';
+                    [$env, $time, $tab, $self, $channel, $event, $data] = $jobData;
 
-                        $tte = $time + $ttl - time();
+                    $expired = false;
+                    $response = '';
 
-                        if ($tte >= 0) {
-                            $response = $pusher->sendTriggerRequest($tab, $self, $event, $data);
-                        } else {
-                            $expired = true;
-                            $expiresCount++;
-                        }
+                    $tte = $time + $ttl - time();
 
-                        if ($processInput['log']) {
-                            $this->log('[' . $this->channel . '] tab: ' . $tab . ($self ? ', session: ' . $self : '') . ', ttl: ' . $ttl . ', tte: ' . $tte);
-                            $this->log(($expired ? 'EXPIRED ' : '>>> ') . $event . ' ' . j_($data));
-
-                            if (!$expired) {
-                                $this->log('<<< ' . j_($response));
-                            }
-
-                            $this->log();
-                        }
+                    if ($tte >= 0) {
+                        $response = $this->getPusher($channel, $env)->sendTriggerRequest($tab, $self, $event, $data);
+                    } else {
+                        $expired = true;
+                        $expiresCount++;
                     }
 
-                    $totalJobsCount += $jobsCount;
+                    if ($processInput['log']) {
+                        $this->log('env: ' . $env . ', channel: ' . $channel . ', tab: ' . $tab . ($self ? ', session: ' . $self : '') . ', ttl: ' . $ttl . ', tte: ' . $tte);
+                        $this->log(($expired ? 'EXPIRED ' : '>>> ') . $event . ' ' . j_($data));
 
-                    write($this->queueFilePath, '');
+                        if (!$expired) {
+                            $this->log('<<< ' . j_($response));
+                        }
 
-                    $totalIterations++;
-
-                    $process->output([
-                                         'iterations'    => $totalIterations,
-                                         'jobs count'    => $totalJobsCount,
-                                         'expires count' => $expiresCount
-                                     ]);
+                        $this->log();
+                    }
                 }
+
+                $totalJobsCount += $jobsCount;
+
+                $totalIterations++;
+
+                $process->outputRR([
+                                       'iterations'    => $totalIterations,
+                                       'jobs count'    => $totalJobsCount,
+                                       'expires count' => $expiresCount,
+                                   ]);
+
+                // todo del {
+
+                $controllersCount = $this->app->controllers->getControllersCount();
+
+                $log->row('i: ' . $totalIterations . ', j: +' . $jobsCount . ' (' . $totalJobsCount . '), e: ' . $expiresCount . ', c: ' . $controllersCount);
+
+                if ($controllersCount > 9) {
+                    $controllers = $this->app->controllers->getControllers();
+
+                    foreach ($controllers as $controllerId => $controller) {
+                        $log->row('    ' . $controller->__meta__->callerId . ' > ' . $controllerId . ' ' . $controller->__meta__->absPath);
+
+                        if ($controllerId > 20 && $controllerId % 100 != 0) {
+                            break;
+                        }
+                    }
+                }
+
+                // todo del }
+
+//                }
             }
+
+
         }
-    }
-
-    private $queueFile;
-
-    private $queueFilePath;
-
-    private function initFiles()
-    {
-        $this->queueFilePath = $this->_protected($this->channel . '.queue');
-
-        if (!file_exists($this->queueFilePath)) {
-            write($this->queueFilePath);
-        }
-
-        $this->queueFile = fopen($this->queueFilePath, 'r');
     }
 
     private function openInstanceProcess()
@@ -170,7 +207,7 @@ class Queue extends \Controller
             $process->break();
 
             return [
-                'time' => dt()
+                'time' => dt(),
             ];
         } else {
             return 'not running';
@@ -184,7 +221,7 @@ class Queue extends \Controller
 
             invert($log);
 
-            $this->openInstanceProcess()->ra(['log' => $log]);
+            $process->inputRA(['log' => $log]);
 
             return 'log ' . ($log ? 'enabled' : 'disabled');
         } else {
@@ -195,15 +232,15 @@ class Queue extends \Controller
     public function getInfo()
     {
         if ($process = $this->openInstanceProcess()) {
-            return $process->output();
+            return $process->_output();
         } else {
             return 'not running';
         }
     }
 
-    public function add($jobData)
+    public function add($jobData, $env)
     {
-        $job = [time(), $jobData['tab'], $jobData['self'], $jobData['event'], $jobData['data']];
+        $job = [$env, time(), $jobData['tab'], $jobData['self'], $jobData['channel'], $jobData['event'], $jobData['data']];
 
         $queueFile = fopen($this->queueFilePath, 'a+');
 
@@ -211,4 +248,3 @@ class Queue extends \Controller
         fclose($queueFile);
     }
 }
-
